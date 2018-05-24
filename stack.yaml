@@ -1,0 +1,8 @@
+resolver: lts-11.3
+
+packages:
+- .
+- idris
+
+extra-deps:
+  - extra-1.6.6
