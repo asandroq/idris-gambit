@@ -5,7 +5,6 @@ import Control.Monad
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.State
 import Data.Foldable
-import Data.List
 
 import Idris.Core.TT
 import IRTS.CodegenCommon
@@ -30,15 +29,10 @@ codegenGambit ci = bracket (openFile (outputFile ci) WriteMode)
                            (\h -> evalStateT (codegenST ci) (Gen 0 Map.empty h))
 
 codegenST :: CodegenInfo -> GenState ()
-codegenST ci = do let decls = sortBy declOrder $ liftDecls ci
-                  ndecls <- genInitialState decls
+codegenST ci = do decls <- genInitialState $ liftDecls ci
                   genPrint preamble
-                  traverse_ (uncurry codegen) ndecls
+                  traverse_ (uncurry codegen) decls
                   genPrint start
-    where
-      declOrder (_, (LConstructor _ _ _)) (_, (LFun _ _ _ _)) = LT
-      declOrder (_, (LFun _ _ _ _)) (_, (LConstructor _ _ _)) = GT
-      declOrder _ _ = EQ
 
 genInitialState :: [(Name, LDecl)] -> GenState [(Name, LDecl)]
 genInitialState = traverse (uncurry go)
