@@ -134,10 +134,7 @@ genApply fn ary args = case compare ary (length args) of
                                   genPrint $ quoteSym fn
                                   traverse_ (\a -> genPrint " " >> genExpr a) args
                                   genPrint ")"
-                         GT -> do tag <- gets genTag
-                                  let newTag = tag + ary - length args
-                                  let extraArgs = (flip sMN) "extraArg" <$> [tag .. newTag - 1]
-                                  modify (\g -> g { genTag = newTag })
+                         GT -> do extraArgs <- replicateM (ary - length args) genVar
                                   genPrint "(lambda ("
                                   genArgs extraArgs
                                   genPrint ") "
@@ -268,6 +265,11 @@ quoteSym name = case name of
 genPrint :: String -> GenState ()
 genPrint s = do out <- gets genOut
                 lift $ hPutStr out s
+
+genVar :: GenState Name
+genVar = do tag <- gets genTag
+            modify (\g -> g {genTag = tag + 1})
+            pure $ MN tag "gensym"
 
 preamble :: String
 preamble = "(declare\n \
