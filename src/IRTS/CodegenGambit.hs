@@ -55,11 +55,7 @@ codegen name (LFun _ _ args expr) = do genPrint "(define ("
                                        genPrint ") "
                                        genExpr expr
                                        genPrint ")\n\n"
-codegen name (LConstructor _ tag _) = do  genPrint ";; "
-                                          genPrint $ quoteSym name
-                                          genPrint " -> "
-                                          genPrint $ show tag
-                                          genPrint "\n"
+codegen _ _ = pure ()
 
 genExpr :: LExp -> GenState ()
 genExpr (LV name) = genPrint $ quoteSym name
