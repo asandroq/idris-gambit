@@ -96,7 +96,7 @@ genExpr (LProj expr fld) = do genPrint "(##vector-ref "
                               genPrint ")"
 genExpr (LCon _ _ name args) = do genPrint "(vector '"
                                   genPrint $ quoteSym name
-                                  traverse_ (\a -> genPrint " " >> genExpr a) args
+                                  genExprs args
                                   genPrint ")"
 genExpr (LCase _ expr alts) = do genPrint "(case "
                                  if any isConCase alts
@@ -124,15 +124,18 @@ genExpr (LError msg) = do genPrint "(error \""
                           genPrint msg
                           genPrint "\")"
 
+genExprs :: [LExp] -> GenState ()
+genExprs = traverse_ (\e -> genPrint " " >> genExpr e)
+
 genApply :: Name -> Int -> [LExp] -> GenState ()
 genApply fn ary args = case compare ary (length args) of
                          LT -> do genPrint "("
                                   genApply fn ary (take ary args)
-                                  traverse_ (\a -> genPrint " " >> genExpr a) (drop ary args)
+                                  genExprs (drop ary args)
                                   genPrint ")"
                          EQ -> do genPrint "("
                                   genPrint $ quoteSym fn
-                                  traverse_ (\a -> genPrint " " >> genExpr a) args
+                                  genExprs args
                                   genPrint ")"
                          GT -> do extraArgs <- replicateM (ary - length args) genVar
                                   genPrint "(lambda ("
@@ -184,26 +187,18 @@ genConst (B64 b) = show b
 genConst _ = "(error \"Constant type not implemented\")"
 
 genOp :: PrimFn -> [LExp] -> GenState ()
-genOp (LPlus (ATInt ITNative)) [l, r] = do genPrint "(##fx+ "
-                                           genExpr l
-                                           genPrint " "
-                                           genExpr r
-                                           genPrint ")"
-genOp (LMinus (ATInt ITNative)) [l, r] = do genPrint "(##fx- "
-                                            genExpr l
-                                            genPrint " "
-                                            genExpr r
-                                            genPrint ")"
-genOp (LMinus (ATInt ITBig)) [l, r] = do genPrint "(- "
-                                         genExpr l
-                                         genPrint " "
-                                         genExpr r
+genOp (LPlus (ATInt ITNative)) args = do genPrint "(##fx+"
+                                         genExprs args
                                          genPrint ")"
-genOp (LTimes (ATInt ITNative)) [l, r] = do genPrint "(##fx* "
-                                            genExpr l
-                                            genPrint " "
-                                            genExpr r
-                                            genPrint ")"
+genOp (LMinus (ATInt ITNative)) args = do genPrint "(##fx-"
+                                          genExprs args
+                                          genPrint ")"
+genOp (LMinus (ATInt ITBig)) args = do genPrint "(-"
+                                       genExprs args
+                                       genPrint ")"
+genOp (LTimes (ATInt ITNative)) args = do genPrint "(##fx*"
+                                          genExprs args
+                                          genPrint ")"
 genOp (LEq aty) [l, r] = let op = case aty of
                                     ATInt (ITFixed _) -> "##fx="
                                     ATInt ITNative -> "##fx="
@@ -234,11 +229,9 @@ genOp (LIntStr ITChar) [x] = do genPrint "(make-string 1 "
 genOp (LIntStr _) [x] = do genPrint "(##number->string "
                            genExpr x
                            genPrint ")"
-genOp LStrConcat [l, r] = do genPrint "(##string-append "
-                             genExpr l
-                             genPrint " "
-                             genExpr r
-                             genPrint ")"
+genOp LStrConcat args = do genPrint "(##string-append"
+                           genExprs args
+                           genPrint ")"
 genOp LWriteStr [_, s] = do genPrint "(display "
                             genExpr s
                             genPrint ")"
