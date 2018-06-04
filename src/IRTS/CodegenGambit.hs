@@ -86,11 +86,10 @@ genExpr (LCon _ _ name args) = do let name' = quoteSym name
                                   pure $ "(vector '" ++ name' ++ args' ++ ")"
 genExpr (LCase _ expr alts) = do expr' <- genExpr expr
                                  alts' <- concat <$> traverse (genAlt expr) alts
-                                 pure $ "(case " ++
-                                      if any isConCase alts
-                                      then "(##vector-ref " ++ expr' ++ " 0)"
-                                      else expr'
-                                   ++ alts' ++ ")"
+                                 let test = if any isConCase alts
+                                            then "(##vector-ref " ++ expr' ++ " 0)"
+                                            else expr'
+                                 pure $ "(case " ++ test ++ alts' ++ ")"
     where
       isConCase (LConCase _ _ _ _) = True
       isConCase _ = False
