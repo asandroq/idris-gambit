@@ -17,7 +17,6 @@ import qualified Data.Map.Strict as Map
 data Gen = Gen
          { genTag :: Int
          , genCtx :: Map.Map Name LDecl
-         , genOut :: Handle
          } deriving (Eq, Show)
 
 
@@ -26,13 +25,13 @@ type GenState = StateT Gen IO
 codegenGambit :: CodeGenerator
 codegenGambit ci = bracket (openFile (outputFile ci) WriteMode)
                            (hClose)
-                           (\h -> evalStateT (codegenST ci) (Gen 0 Map.empty h))
+                           (\h -> evalStateT (codegenST h ci) (Gen 0 Map.empty))
 
-codegenST :: CodegenInfo -> GenState ()
-codegenST ci = do decls <- genInitialState $ liftDecls ci
-                  genPrint preamble
-                  traverse_ (uncurry codegen) decls
-                  genPrint start
+codegenST :: Handle -> CodegenInfo -> GenState ()
+codegenST h ci = do decls <- genInitialState $ liftDecls ci
+                    lift $ hPutStr h preamble
+                    traverse_ (codegen h) decls
+                    lift $ hPutStr h start
 
 genInitialState :: [(Name, LDecl)] -> GenState [(Name, LDecl)]
 genInitialState = traverse (uncurry go)
@@ -48,11 +47,11 @@ genInitialState = traverse (uncurry go)
                                                     }
                                           pure (name, cnt)
 
-codegen :: Name -> LDecl -> GenState ()
-codegen name (LFun _ _ args expr) = do let name' = quoteSym name
-                                       let args' = genArgs args
-                                       expr' <- genExpr expr
-                                       genPrint $ "(define (" ++ name' ++ args' ++ ") " ++ expr' ++ ")\n\n"
+codegen :: Handle -> (Name, LDecl) -> GenState ()
+codegen h (name, (LFun _ _ args expr)) = do let name' = quoteSym name
+                                            let args' = genArgs args
+                                            expr' <- genExpr expr
+                                            lift $ hPutStr h $ "(define (" ++ name' ++ args' ++ ") " ++ expr' ++ ")\n\n"
 codegen _ _ = pure ()
 
 genExpr :: LExp -> GenState String
@@ -201,10 +200,6 @@ quoteSym name = case name of
                   _ -> "|[Idris] " ++ cleanup name ++ "|"
     where
       cleanup = concatMap (\c -> if c == '|' then "\\|" else [c]) . showCG
-
-genPrint :: String -> GenState ()
-genPrint s = do out <- gets genOut
-                lift $ hPutStr out s
 
 genVar :: GenState Name
 genVar = do tag <- gets genTag
