@@ -2,7 +2,9 @@ module IRTS.CodegenGambit (codegenGambit) where
 
 import Control.Exception
 import Control.Monad
+import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
+import Control.Monad.Trans.Reader
 import Control.Monad.Trans.State
 import Data.Foldable
 
@@ -14,49 +16,31 @@ import System.IO
 
 import qualified Data.Map.Strict as Map
 
-data Gen = Gen
-         { genTag :: Int
-         , genCtx :: Map.Map Name LDecl
-         } deriving (Eq, Show)
-
-
-type GenState = StateT Gen IO
+type Context = Map.Map Name LDecl
+type Generator = ReaderT Context (StateT Int IO)
 
 codegenGambit :: CodeGenerator
 codegenGambit ci = bracket (openFile (outputFile ci) WriteMode)
                            (hClose)
-                           (\h -> evalStateT (codegenST h ci) (Gen 0 Map.empty))
+                           (\h -> codegen h (liftDecls ci))
 
-codegenST :: Handle -> CodegenInfo -> GenState ()
-codegenST h ci = do decls <- genInitialState $ liftDecls ci
-                    lift $ hPutStr h preamble
-                    traverse_ (codegen h) decls
-                    lift $ hPutStr h start
+codegen :: Handle -> [(Name, LDecl)] -> IO ()
+codegen h decls = do hPutStr h preamble
+                     evalStateT (runReaderT (codegenST h decls) (Map.fromList decls)) 0
+                     hPutStr h start
 
-genInitialState :: [(Name, LDecl)] -> GenState [(Name, LDecl)]
-genInitialState = traverse (uncurry go)
+codegenST :: Handle -> [(Name, LDecl)] -> Generator ()
+codegenST h = traverse_ go
     where
-      go name f@(LFun _ _ _ _) = do gen <- get
-                                    put $ gen { genCtx = Map.insert name f (genCtx gen) }
-                                    pure (name, f)
-      go name (LConstructor _ _ ary) = do gen <- get
-                                          let tag = genTag gen
-                                          let cnt = LConstructor name tag ary
-                                          put $ gen { genTag = tag + 1
-                                                    , genCtx = Map.insert name cnt (genCtx gen)
-                                                    }
-                                          pure (name, cnt)
+      go (name, (LFun _ _ args expr)) = do let name' = quoteSym name
+                                           let args' = genArgs args
+                                           expr' <- genExpr expr
+                                           liftIO $ hPutStr h $ "(define (" ++ name' ++ args' ++ ") " ++ expr' ++ ")\n\n"
+      go _ = pure ()
 
-codegen :: Handle -> (Name, LDecl) -> GenState ()
-codegen h (name, (LFun _ _ args expr)) = do let name' = quoteSym name
-                                            let args' = genArgs args
-                                            expr' <- genExpr expr
-                                            lift $ hPutStr h $ "(define (" ++ name' ++ args' ++ ") " ++ expr' ++ ")\n\n"
-codegen _ _ = pure ()
-
-genExpr :: LExp -> GenState String
+genExpr :: LExp -> Generator String
 genExpr (LV name) = pure $ quoteSym name
-genExpr (LApp _ (LV fn) args) = do ctx <- gets genCtx
+genExpr (LApp _ (LV fn) args) = do ctx <- ask
                                    case Map.lookup fn ctx of
                                      Just (LConstructor _ _ ary) -> genApply fn ary args
                                      Just (LFun _ _ as _) -> genApply fn (length as) args
@@ -101,10 +85,10 @@ genExpr (LOp fn args) = genOp fn args
 genExpr LNothing = pure "(##void)"
 genExpr (LError msg) = pure $ "(error \"" ++ msg ++ "\")"
 
-genExprs :: [LExp] -> GenState String
+genExprs :: [LExp] -> Generator String
 genExprs exprs = concat . map (" " ++) <$> traverse genExpr exprs
 
-genApply :: Name -> Int -> [LExp] -> GenState String
+genApply :: Name -> Int -> [LExp] -> Generator String
 genApply fn ary args = case compare ary (length args) of
                          LT -> do outer <- genApply fn ary (take ary args)
                                   rest <- genExprs (drop ary args)
@@ -115,10 +99,7 @@ genApply fn ary args = case compare ary (length args) of
                                   inner <- genApply fn ary (args ++ (LV <$> extraArgs))
                                   pure $ "(lambda (" ++ genArgs extraArgs ++ ") " ++ inner ++ ")"
 
-genArgs :: [Name] -> String
-genArgs = concatMap ((" " ++) . quoteSym)
-
-genAlt :: LExp -> LAlt -> GenState String
+genAlt :: LExp -> LAlt -> Generator String
 genAlt cnt (LConCase _ name args expr) = do cnt' <- genExpr cnt
                                             expr' <- genExpr expr
                                             let body = if length args > 0
@@ -145,7 +126,7 @@ genConst (B32 b) = show b
 genConst (B64 b) = show b
 genConst _ = "(error \"Constant type not implemented\")"
 
-genOp :: PrimFn -> [LExp] -> GenState String
+genOp :: PrimFn -> [LExp] -> Generator String
 genOp (LPlus (ATInt ITNative)) args = do args' <- genExprs args
                                          pure $ "(##fx+" ++ args' ++ ")"
 genOp (LMinus (ATInt ITNative)) args = do args' <- genExprs args
@@ -189,10 +170,18 @@ genOp LWriteStr [_, s] = do s' <- genExpr s
 genOp fn _ = pure $ "(error \"Primitive operation " ++ show fn ++ " not implemented yet\")"
 
 -- Idris's backend encodes booleans as integers
-genCompOp :: String -> LExp -> LExp -> GenState String
+genCompOp :: String -> LExp -> LExp -> Generator String
 genCompOp op lhs rhs = do lhs' <- genExpr lhs
                           rhs' <- genExpr rhs
                           pure $ "(if (" ++ op ++ " " ++ lhs' ++ " " ++ rhs' ++ ") 1 0)"
+
+genVar :: Generator Name
+genVar = do tag <- lift get
+            lift $ put (tag + 1)
+            pure $ MN tag "gensym"
+
+genArgs :: [Name] -> String
+genArgs = concatMap ((" " ++) . quoteSym)
 
 quoteSym :: Name -> String
 quoteSym name = case name of
@@ -200,11 +189,6 @@ quoteSym name = case name of
                   _ -> "|[Idris] " ++ cleanup name ++ "|"
     where
       cleanup = concatMap (\c -> if c == '|' then "\\|" else [c]) . showCG
-
-genVar :: GenState Name
-genVar = do tag <- gets genTag
-            modify (\g -> g {genTag = tag + 1})
-            pure $ MN tag "gensym"
 
 preamble :: String
 preamble = "(declare\n \
