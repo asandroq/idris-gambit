@@ -1,106 +1,87 @@
 module IRTS.CodegenGambit (codegenGambit) where
 
 import Control.Exception
-import Control.Monad
-import Control.Monad.IO.Class
-import Control.Monad.Trans.Class
 import Control.Monad.Trans.Reader
-import Control.Monad.Trans.State
 import Data.Foldable
 
 import Idris.Core.TT
 import IRTS.CodegenCommon
-import IRTS.Lang hiding (lift)
+import IRTS.Defunctionalise hiding (genArgs, lift)
 
 import System.IO
 
 import qualified Data.Map.Strict as Map
 
-type Context = Map.Map Name LDecl
-type Generator = ReaderT Context (StateT Int IO)
+
+type Generator = Reader (Map.Map Name DDecl)
 
 codegenGambit :: CodeGenerator
 codegenGambit ci = bracket (openFile (outputFile ci) WriteMode)
                            (hClose)
-                           (\h -> codegen h (liftDecls ci))
+                           (\h -> codegen h (defunDecls ci))
 
-codegen :: Handle -> [(Name, LDecl)] -> IO ()
+codegen :: Handle -> [(Name, DDecl)] -> IO ()
 codegen h decls = do hPutStr h preamble
-                     evalStateT (runReaderT (codegenST h decls) (Map.fromList decls)) 0
+                     traverse_ go decls
                      hPutStr h start
-
-codegenST :: Handle -> [(Name, LDecl)] -> Generator ()
-codegenST h = traverse_ go
     where
-      go (name, (LFun _ _ args expr)) = do let name' = quoteSym name
-                                           let args' = genArgs args
-                                           expr' <- genExpr expr
-                                           liftIO $ hPutStr h $ "(define (" ++ name' ++ args' ++ ") " ++ expr' ++ ")\n\n"
+      go (name, (DFun _ args expr)) = do let name' = quoteSym name
+                                         let args' = genArgs args
+                                         let expr' = runReader (genExpr expr) ctx
+                                         hPutStr h $ "(define (" ++ name' ++ args' ++ ") " ++ expr' ++ ")\n\n"
       go _ = pure ()
 
-genExpr :: LExp -> Generator String
-genExpr (LV name) = pure $ quoteSym name
-genExpr (LApp _ (LV fn) args) = do ctx <- ask
-                                   case Map.lookup fn ctx of
-                                     Just (LConstructor _ _ ary) -> genApply fn ary args
-                                     Just (LFun _ _ as _) -> genApply fn (length as) args
-                                     Nothing -> genApply fn (length args) args
-genExpr (LApp _ f _) = do f' <- genExpr f
-                          pure $ "(error \"Impossible application of expression " ++ f' ++ ")"
-genExpr (LLazyApp fn args) = do expr <- genExpr (LApp False (LV fn) args)
-                                pure $ "(delay "++ expr ++ ")"
-genExpr (LLazyExp expr) = do expr' <- genExpr expr
-                             pure $ "(delay " ++ expr' ++ ")"
-genExpr (LForce (LLazyApp n args)) = genExpr (LApp False (LV n) args)
-genExpr (LForce expr) = do expr' <- genExpr expr
-                           pure $ "(force " ++ expr' ++ ")"
-genExpr (LLet name expr body) = do let name' = quoteSym name
+      ctx = Map.fromList decls
+
+genExpr :: DExp -> Generator String
+genExpr (DV name) = pure $ quoteSym name
+genExpr (DApp _ fn args) = do ctx <- ask
+                              let fn' = quoteSym fn
+                              args' <- genExprs args
+                              case Map.lookup fn ctx of
+                                Just (DConstructor _ _ _) -> genExpr (DC Nothing 0 fn args)
+                                Just (DFun _ _ _) -> pure $ "(" ++ fn' ++ args' ++ ")"
+                                Nothing -> pure $ "(error \"No such variable " ++ fn' ++ "\")"
+genExpr (DLet name expr body) = do let name' = quoteSym name
                                    expr' <- genExpr expr
                                    body' <- genExpr body
                                    pure $ "(let ((" ++ name' ++ " " ++ expr' ++ ")) " ++ body' ++ ")"
-genExpr (LLam args body) = do let args' = genArgs args
-                              body' <- genExpr body
-                              pure $ "(lambda (" ++ args' ++ ") " ++ body' ++ ")"
-genExpr (LProj expr fld) = do expr' <- genExpr expr
+genExpr (DUpdate name expr) = do let name' = quoteSym name
+                                 expr' <- genExpr expr
+                                 pure $ "(begin (set! " ++ name' ++ " " ++ expr' ++ ") " ++ name' ++ ")"
+genExpr (DProj expr fld) = do expr' <- genExpr expr
                               let fld' = show (fld + 1)
                               pure $ "(##vector-ref " ++ expr' ++ " " ++ fld' ++ ")"
-genExpr (LCon _ _ name args) = do let name' = quoteSym name
-                                  args' <- genExprs args
-                                  pure $ "(vector '" ++ name' ++ args' ++ ")"
-genExpr (LCase _ expr alts) = do expr' <- genExpr expr
-                                 alts' <- concat <$> traverse (genAlt expr) alts
-                                 let test = if any isConCase alts
-                                            then "(##vector-ref " ++ expr' ++ " 0)"
-                                            else expr'
-                                 pure $ "(case " ++ test ++ alts' ++ ")"
-    where
-      isConCase (LConCase _ _ _ _) = True
-      isConCase _ = False
-genExpr (LConst cnt) = pure $ genConst cnt
-genExpr (LForeign _ t _) = do let name = case t of
+genExpr (DC _ _ name args) = do let name' = quoteSym name
+                                args' <- genExprs args
+                                pure $ "(vector '" ++ name' ++ args' ++ ")"
+genExpr (DCase _ expr alts) = genCase expr alts
+genExpr (DChkCase expr alts) = genCase expr alts
+genExpr (DConst cnt) = pure $ genConst cnt
+genExpr (DForeign _ t _) = do let name = case t of
                                            FStr s -> s
                                            _ -> show t
                               pure $ "(error \"Foreign call to '" ++ name ++ "' not implemented\")"
-genExpr (LOp fn args) = genOp fn args
-genExpr LNothing = pure "(##void)"
-genExpr (LError msg) = pure $ "(error \"" ++ msg ++ "\")"
+genExpr (DOp fn args) = genOp fn args
+genExpr DNothing = pure "(##void)"
+genExpr (DError msg) = pure $ "(error \"" ++ msg ++ "\")"
 
-genExprs :: [LExp] -> Generator String
+genExprs :: [DExp] -> Generator String
 genExprs exprs = concat . map (" " ++) <$> traverse genExpr exprs
 
-genApply :: Name -> Int -> [LExp] -> Generator String
-genApply fn ary args = case compare ary (length args) of
-                         LT -> do outer <- genApply fn ary (take ary args)
-                                  rest <- genExprs (drop ary args)
-                                  pure $ "(" ++ outer ++ rest ++ ")"
-                         EQ -> do args' <- genExprs args
-                                  pure $ "(" ++ quoteSym fn ++ args' ++ ")"
-                         GT -> do extraArgs <- replicateM (ary - length args) genVar
-                                  inner <- genApply fn ary (args ++ (LV <$> extraArgs))
-                                  pure $ "(lambda (" ++ genArgs extraArgs ++ ") " ++ inner ++ ")"
+genCase :: DExp -> [DAlt] -> Generator String
+genCase expr alts =  do expr' <- genExpr expr
+                        alts' <- concat <$> traverse (genAlt expr) alts
+                        let test = if any isConCase alts
+                                   then "(##vector-ref " ++ expr' ++ " 0)"
+                                   else expr'
+                        pure $ "(case " ++ test ++ alts' ++ ")"
+    where
+      isConCase (DConCase _ _ _ _) = True
+      isConCase _ = False
 
-genAlt :: LExp -> LAlt -> Generator String
-genAlt cnt (LConCase _ name args expr) = do cnt' <- genExpr cnt
+genAlt :: DExp -> DAlt -> Generator String
+genAlt cnt (DConCase _ name args expr) = do cnt' <- genExpr cnt
                                             expr' <- genExpr expr
                                             let body = if length args > 0
                                                        then "(let (" ++ bindings cnt' ++ ") " ++ expr' ++ ")"
@@ -109,9 +90,9 @@ genAlt cnt (LConCase _ name args expr) = do cnt' <- genExpr cnt
     where
       bindings c = concatMap (binding c) (zip args [1::Int ..])
       binding c (a, i) = "(" ++ quoteSym a ++ " (##vector-ref " ++ c ++ " " ++ show i ++ "))"
-genAlt _ (LConstCase cnt expr) = do expr' <- genExpr expr
+genAlt _ (DConstCase cnt expr) = do expr' <- genExpr expr
                                     pure $ "((" ++ genConst cnt ++ ") " ++ expr' ++ ")"
-genAlt _ (LDefaultCase expr) = do expr' <- genExpr expr
+genAlt _ (DDefaultCase expr) = do expr' <- genExpr expr
                                   pure $ "(else " ++ expr' ++ ")"
 
 genConst :: Const -> String
@@ -126,7 +107,7 @@ genConst (B32 b) = show b
 genConst (B64 b) = show b
 genConst _ = "(error \"Constant type not implemented\")"
 
-genOp :: PrimFn -> [LExp] -> Generator String
+genOp :: PrimFn -> [DExp] -> Generator String
 genOp (LPlus (ATInt ITNative)) args = do args' <- genExprs args
                                          pure $ "(##fx+" ++ args' ++ ")"
 genOp (LMinus (ATInt ITNative)) args = do args' <- genExprs args
@@ -170,15 +151,10 @@ genOp LWriteStr [_, s] = do s' <- genExpr s
 genOp fn _ = pure $ "(error \"Primitive operation " ++ show fn ++ " not implemented yet\")"
 
 -- Idris's backend encodes booleans as integers
-genCompOp :: String -> LExp -> LExp -> Generator String
+genCompOp :: String -> DExp -> DExp -> Generator String
 genCompOp op lhs rhs = do lhs' <- genExpr lhs
                           rhs' <- genExpr rhs
                           pure $ "(if (" ++ op ++ " " ++ lhs' ++ " " ++ rhs' ++ ") 1 0)"
-
-genVar :: Generator Name
-genVar = do tag <- lift get
-            lift $ put (tag + 1)
-            pure $ MN tag "gensym"
 
 genArgs :: [Name] -> String
 genArgs = concatMap ((" " ++) . quoteSym)
