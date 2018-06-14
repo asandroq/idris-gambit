@@ -144,6 +144,8 @@ genOp (LIntStr ITChar) [x] = do x' <- genExpr x
                                 pure $ "(make-string 1 " ++ x' ++ ")"
 genOp (LIntStr _) [x] = do x' <- genExpr x
                            pure $ "(##number->string " ++ x' ++ ")"
+genOp LFloatStr [x] = do x' <- genExpr x
+                         pure $ "(##flonum->string " ++ x' ++ " 10 #f)"
 genOp LStrConcat args = do args' <- genExprs args
                            pure $  "(##string-append" ++ args' ++ ")"
 genOp LWriteStr [_, s] = do s' <- genExpr s
